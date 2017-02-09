@@ -93,4 +93,6 @@ for current_batch_of_words in words_in_dataset:
     probabilities.append(tf.nn.softmax(logits))
     loss += loss_function(probabilities, target_words)
 
+    
+
 
