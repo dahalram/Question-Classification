@@ -101,21 +101,16 @@ class LSTMNumpy:
         # Assign instance variables
         self.hidden_dim = hidden_dim
         self.bptt_truncate = bptt_truncate
-        self.word_dim = word_dim
+        self.wordvec_dim = wordvec_dim
         self.label_dim = label_dim
 
         # Randomly initialize the network parameters
-        self.U1 = np.random.uniform(-np.sqrt(1./word_dim), np.sqrt(1./word_dim), (hidden_dim, word_dim))
-        self.U2 = np.random.uniform(-np.sqrt(1./word_dim), np.sqrt(1./word_dim), (hidden_dim, word_dim))
-        self.U3 = np.random.uniform(-np.sqrt(1./word_dim), np.sqrt(1./word_dim), (hidden_dim, word_dim))
-        self.U4 = np.random.uniform(-np.sqrt(1./word_dim), np.sqrt(1./word_dim), (hidden_dim, word_dim))
-
+        self.U1 = np.random.uniform(-np.sqrt(1./wordvec_dim), np.sqrt(1./wordvec_dim), (hidden_dim, wordvec_dim))
         self.V = np.random.uniform(-np.sqrt(1./hidden_dim), np.sqrt(1./hidden_dim), (label_dim, hidden_dim))
-        
         self.W1 = np.random.uniform(-np.sqrt(1./hidden_dim), np.sqrt(1./hidden_dim), (hidden_dim, hidden_dim))
-        self.W2 = np.random.uniform(-np.sqrt(1./hidden_dim), np.sqrt(1./hidden_dim), (hidden_dim, hidden_dim))
-        self.W3 = np.random.uniform(-np.sqrt(1./hidden_dim), np.sqrt(1./hidden_dim), (hidden_dim, hidden_dim))
-        self.W4 = np.random.uniform(-np.sqrt(1./hidden_dim), np.sqrt(1./hidden_dim), (hidden_dim, hidden_dim))
+        
+        self.tp = np.concatenate((self.U1, self.W1), axis = 1)
+        self.W = np.concatenate((self.tp, self.tp, self.tp, self.tp), axis = 0)
 
 
 def forward_propagation(self, x):
@@ -127,31 +122,45 @@ def forward_propagation(self, x):
     s_t = np.zeros((T+1, self.hidden_dim))
     s_t[-1] = np.zeros(self.hidden_dim)
     
-    i_t = np.zeros((T+1, self.hidden_dim))
-    i_t[-1] = np.zeros(self.hidden_dim)
+    c_t = np.zeros((T+1, self.hidden_dim))
+    c_t[-1] = np.zeros(self.hidden_dim)
 
-    f_t = np.zeros((T+1, self.hidden_dim))
-    f_t = np.zeros(self.hidden_dim)
+    ## Input, Forget and Output gates
+    i_t = np.zeros((T, self.hidden_dim))
+    f_t = np.zeros((T, self.hidden_dim))
+    o_t = np.zeros((T, self.hidden_dim))
 
-    o_t = np.zeros((T+1, self.hidden_dim))
-    o_t = np.zeros(self.hidden_dim)
-
-    g_t = np.zeros((T+1, self.hidden_dim))
-    g_t = np.zeros(self.hidden_dim)
+    g_t = np.zeros((T, self.hidden_dim))
+    a_t = np.zeros((T, self.hidden_dim))
 
     # The outputs at each time step. Again, we save them for later.
     op_t = np.zeros(self.label_dim)
     
+    ## word dim TODO
     # For each time step...
     for a in np.arange(T):
-        # LSTM layer
-        i_t[a] = hard_sigmoid(self.U[:,x_t[a]] + W[0].dot(s_t_prev) + b[0]) # adding a bias
-        f_t[a] = hard_sigmoid(self.U[:,x_t[a]] + W[1].dot(s_t_prev) + b[1])
-        o_t[a] = hard_sigmoid(self.U[:,x_t[a]] + W[2].dot(s_t_prev) + b[2])
 
-        g_t[a] = np.tanh(self.U[:,x_t[a]] + W[3].dot(s_t_prev) + b[3])
-        c_t[a] = c_t1_prev * f_t + g_t * i_t
-        s_t[a] = np.tanh(c_t) * o_t
+        X_tm = index_to_word[x[a]]
+
+        M = np.concatenate((X_tm, s_t[a-1]), axis = 0)
+        g_t[a] = self.dot(M)
+        i_t[a] = softmax(g_t[self.hidden_dim:2*self.hidden_dim,:])
+        f_t[a] = softmax(g_t[self.hidden_dim:3*self.hidden_dim,:])
+        o_t[a] = softmax(g_t[self.hidden_dim:4*self.hidden_dim,:])
+        a_t[a] = np.tanh(g_t[:self.hidden_dim,:])
+        c_t[a] = i_t * a_t + f_t * c_t[a-1]
+        s_t[a] = o_t * np.tanh(c_t[a])
+        
+
+    # for a in np.arange(T):
+    #     # LSTM layer
+    #     i_t[a] = hard_sigmoid(self.U[:,x_t[a]] + W[0].dot(s_t_prev) + b[0]) # adding a bias
+    #     f_t[a] = hard_sigmoid(self.U[:,x_t[a]] + W[1].dot(s_t_prev) + b[1])
+    #     o_t[a] = hard_sigmoid(self.U[:,x_t[a]] + W[2].dot(s_t_prev) + b[2])
+
+    #     g_t[a] = np.tanh(self.U[:,x_t[a]] + W[3].dot(s_t_prev) + b[3])
+    #     c_t[a] = c_t1_prev * f_t + g_t * i_t
+    #     s_t[a] = np.tanh(c_t) * o_t
 
     op_t = softmax(self.V.dot(s_t[-2])) 
 
@@ -170,7 +179,7 @@ def forward_propagation(self, x):
 
     # op_t = softmax(self.V.dot(s_t) + c)[0] # Bias term c
 
-    return [op_t, s_t]
+    return [op_t, s_t, c_t, i_t, f_t, o_t, g_t, a_t]
 
 LSTMNumpy.forward_propagation = forward_propagation
 
@@ -204,40 +213,50 @@ LSTMNumpy.calculate_loss = calculate_loss
 def bptt(self, x, y):
     T = len(x)
     # Perform forward propagation
-    o, s = self.forward_propagation(x)
+    op_t, s_t, c_t, i_t, f_t, o_t, g_t, a_t = self.forward_propagation(x)
     # We accumulate the gradients in these variables
-    dLdU = np.zeros(self.U.shape)
+    # dLdU = np.zeros(self.U.shape)
     dLdV = np.zeros(self.V.shape)
     dLdW = np.zeros(self.W.shape)
-    delta_o = o
+    delta_o = op_t
     delta_o[y] -= 1.
 
     # For each output backwards...
-    dLdV += np.outer(delta_o, s[-1].T)
+    dLdV += np.outer(delta_o, s_t[-1].T)
+
     # Initial delta calculation
-    delta_t = self.V.T.dot(delta_o) * (1 - (s[-1] ** 2))
+    # delta_t = self.V.T.dot(delta_o) * (1 - (s[-1] ** 2))
+    dlds = self.V.T.dot(delta_o)
+    dT = dlds * (1- s_t[-1] ** 2)
+    
+
+
     # Backpropagation through time (for at most self.bptt_truncate steps)
     for bptt_step in np.arange(max(0, (T-1)-self.bptt_truncate), (T-1)+1)[::-1]:
         #print "Backpropagation step t=%d bptt step=%d " % (t, bptt_step)
-        dLdW += np.outer(delta_t, s[bptt_step-1])              
-        dLdU[:,x[bptt_step]] += delta_t
+        ## TODO
+        X_tm = index_to_word[x[bptt_step]]
+
+        M = np.concatenate((X_tm, s_t[bptt_step-1]), axis = 0)
+        dLdW += np.outer(delta_t, M) 
+        
+        # dLdU[:,x[bptt_step]] += delta_t
         # Update delta for next step
         delta_t = self.W.T.dot(delta_t) * (1 - s[bptt_step-1] ** 2)
-    return [dLdU, dLdV, dLdW]
+    return [dLdV, dLdW]
  
 LSTMNumpy.bptt = bptt
 
 # Performs one step of SGD.
 def numpy_sgd_step(self, x, y, learning_rate):
     # Calculate the gradients
-    dLdU, dLdV, dLdW = self.bptt(x, y)
+    dLdV, dLdW = self.bptt(x, y)
     # Change parameters according to gradients and learning rate
-    self.U -= learning_rate * dLdU
+    # self.U -= learning_rate * dLdU
     self.V -= learning_rate * dLdV
     self.W -= learning_rate * dLdW
 
 LSTMNumpy.numpy_sgd_step = numpy_sgd_step
-
 
 
 
